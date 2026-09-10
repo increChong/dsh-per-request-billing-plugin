@@ -23,11 +23,11 @@ dsh plugin --profile web add dsh-per-request-billing
 `dsh plugin` 只是 pnpm 的转发器，因此任何 pnpm 能解析的来源都可以：
 
 ```sh
-# git 仓库
-dsh plugin --profile web add github:increChong/dsh-per-request-billing
+# git 仓库（推荐）
+dsh plugin --profile web add github:increChong/dsh-per-request-billing-plugin
 
-# 本地目录（开发时最方便）
-dsh plugin --profile web add /path/to/dsh-per-request-billing
+# 本地目录（开发时最方便，改完 npm run build 即生效）
+dsh plugin --profile web add /path/to/dsh-per-request-billing-plugin
 
 # 打包后的 tarball
 npm pack && dsh plugin --profile web add ./dsh-per-request-billing-0.1.0.tgz
