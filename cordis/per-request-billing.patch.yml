@@ -1,0 +1,15 @@
+# Composition layer contributed by the `dsh-per-request-billing` bundle.
+#
+# A bundle patch is ONE insert over the profile root; later bundle patches and
+# the user's own `cordis.patch.yml` address these rows by id, and a patch
+# replaces a targeted row's whole `config` rather than merging into it.
+#
+# ONLY the host half appears here. The browser half is not a composition row:
+# the client build discovers it through the package's `dsh.client` declaration
+# and serves `lib/client.js` over the web module graph, where the shell loads
+# it with `window.__ModuleLoader__.load`. Adding a client row here would name a
+# Node-side entry point that does not exist.
+
+- insert:
+    - id: per-request-billing
+      name: 'dsh-per-request-billing'
