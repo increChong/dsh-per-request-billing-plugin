@@ -40,7 +40,7 @@ if (dshInstall.length > 0 && existsSync(join(dshInstall, '@deepseek-ai/dsh-tools
   // and the runtime supplies them, so there is nothing to install here.
   const scope = join(root, 'node_modules/@deepseek-ai')
   mkdirSync(scope, { recursive: true })
-  for (const dependency of ['dsh-tools', 'schemastery', 'dsh-util-values', 'dsh-brand', 'cordis']) {
+  for (const dependency of ['dsh-tools', 'schemastery', 'dsh-util-values', 'dsh-brand', 'cordis', 'dsh-settings', 'dsh-scope']) {
     const target = join(dshInstall, '@deepseek-ai', dependency)
     const link = join(scope, dependency)
     if (existsSync(target) && !existsSync(link)) symlinkSync(target, link, 'dir')
@@ -155,9 +155,11 @@ globalThis.document = { createElement: () => ({ dataset: {}, remove: () => {} })
 exportsObject.apply(stubCtx)
 check('requires only seeded specifiers', unseeded === undefined, `tried to require ${unseeded}`)
 check('required react from the module table', sees.includes('react'))
-check('registers the settings page', registered.some((entry) => entry.options.name === 'settings.section' && entry.options.id === 'per-request-billing'))
 const cardKeys = registered.filter((entry) => entry.options.name === 'settings.models.provider-card').map((entry) => entry.options.key)
 check('registers both provider-card families', cardKeys.includes('llm-pi-ai') && cardKeys.includes('llm-deepseek'), cardKeys.join(', '))
+check('registers no settings page of its own',
+  !registered.some((entry) => entry.options.name === 'settings.section'),
+  registered.map((entry) => entry.options.name).join(', '))
 check('every registration carries a component', registered.every((entry) => typeof entry.component === 'function'))
 check('the ProviderCard component renders from slot props',
   registered
@@ -179,71 +181,79 @@ check('subscribes to the forwarded adapter event through the remote gateway',
     `${globalThis.fetchCalls - before} fetch(es)`)
 }
 
-// The reset button must act on what the host actually returns. It used to read
-// `catalog.models`, a field the host never sends, so its loop body never ran.
+// The card has to write what the user actually toggled — the provider switch
+// for the provider, a single model for a chip.
 await new Promise((resolve) => setTimeout(resolve, 0))
 {
-  /** Flatten a rendered element tree into a list of nodes. */
+  /**
+   * Expand one element tree into host elements. Function components are
+   * invoked, which is enough for this UI: none of its sub-components uses a
+   * hook beyond the store subscription on the card itself.
+   */
   const flatten = (node, out = []) => {
     if (Array.isArray(node)) {
       for (const item of node) flatten(item, out)
       return out
     }
     if (node === null || typeof node !== 'object') return out
+    if (typeof node.type === 'function') return flatten(node.type(node.props), out)
     out.push(node)
     flatten(node.children, out)
     return out
   }
-  const panelEntry = registered.find((entry) => entry.options.name === 'settings.section' && entry.options.id === 'per-request-billing')
-  const tree = flatten(panelEntry.component())
-  const button = tree.find((node) => node.type === 'button' && [].concat(node.children ?? []).includes('清除单模型勾选'))
-  check('the settings page renders a reset button', button !== undefined,
-    `rendered ${tree.length} node(s); ready=${panelEntry.component.toString().length > 0}`)
-  if (button !== undefined) {
-    const before = hostCalls.length
-    await button.props.onClick()
-    const writes = hostCalls.slice(before).filter((call) => call.method === 'POST').map((call) => call.body)
-    check('it writes one unmark per explicitly marked model',
-      writes.length === 1 && writes[0].scope === 'model' && writes[0].provider === 'demo' && writes[0].model === 'model-a' && writes[0].on === false,
-      JSON.stringify(writes))
-    check('it leaves inherited models alone', !writes.some((body) => body.model === 'model-b'), JSON.stringify(writes))
-  }
+  const entry = registered.find((e) => e.options.name === 'settings.models.provider-card' && e.options.key === 'llm-pi-ai')
+  const tree = flatten(entry.component({ provider: { provider: 'demo', displayName: 'Demo' } }))
+  const labels = tree.filter((node) => node.type === 'label')
+  const providerRow = labels.find((node) => node.props.className === 'prb-row')
+  const chip = (id) => labels.find((node) => String(node.props.className).startsWith('prb-model')
+    && flatten(node.children).some((child) => child.type === 'span' && [].concat(child.children ?? []).includes(id)))
+  const toggle = (label) => (value) => flatten(label.children)
+    .find((child) => child.type === 'input')
+    .props.onChange({ target: { checked: value } })
+
+  check('the card renders the provider switch and one chip per model',
+    providerRow !== undefined && chip('model-a') !== undefined && chip('model-b') !== undefined,
+    `${labels.length} label(s)`)
+  check('an inherited model is labelled as following its provider',
+    flatten(chip('model-b').children).some((child) => [].concat(child.children ?? []).includes('· 跟随提供方')))
+  check('an individually set model carries no inheritance label',
+    !flatten(chip('model-a').children).some((child) => [].concat(child.children ?? []).includes('· 跟随提供方')))
+
+  const before = hostCalls.length
+  await toggle(providerRow)(true)
+  await toggle(chip('model-a'))(false)
+  const writes = hostCalls.slice(before).filter((call) => call.method === 'POST').map((call) => call.body)
+  check('the provider switch writes a provider mark',
+    JSON.stringify(writes[0]) === JSON.stringify({ scope: 'provider', provider: 'demo', on: true }), JSON.stringify(writes[0]))
+  check('a chip writes only its own model',
+    JSON.stringify(writes[1]) === JSON.stringify({ scope: 'model', provider: 'demo', model: 'model-a', on: false }), JSON.stringify(writes[1]))
 }
 
 // ------------------------------------------------------- host route contract
-console.log('host route contract (through the real handler)')
-// The stored USER section, merged exactly the way @deepseek-ai/dsh-settings
-// does it: `update` recurses into matching keys, so a key omitted from the
-// patch is KEPT. Modelling this with Object.assign instead would silently
-// accept a delete-based unmark that cannot work against the real service.
-const settingsState = { global: false, providerDefault: {}, models: {} }
-const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
-const mergeLayers = (under, over) => {
-  if (over === undefined) return under
-  if (!isPlainObject(under) || !isPlainObject(over)) return over
-  const merged = { ...under }
-  for (const [key, value] of Object.entries(over)) merged[key] = key in merged ? mergeLayers(merged[key], value) : value
-  return merged
+console.log('host route contract (through the real settings service)')
+// The write path is checked against the REAL settings provider rather than a
+// hand-modelled stub. Both primitives it offers matter here and neither is
+// guessable: `update` merges recursively (so it can only add or overwrite a
+// key) while `mutate` applies path ops (so it can also remove one). A stub
+// that got either wrong would rubber-stamp a write path that cannot work.
+const { Context } = await import('@deepseek-ai/cordis')
+const { SettingsProvider } = await import('@deepseek-ai/dsh-settings')
+
+/** Minimal writable provider whose document lives in memory. */
+class MemorySettings extends SettingsProvider {
+  doc = {}
+  get writable() { return true }
+  async load() { return this.doc }
+  async persist(ns, section) { this.doc[ns] = structuredClone(section) }
 }
-let watched
-const settingsScope = {
-  get: () => ({ global: settingsState.global, providerDefault: { ...settingsState.providerDefault }, models: { ...settingsState.models } }),
-  watch: (callback) => {
-    watched = callback
-    return () => {}
-  },
-  update: async (patch) => {
-    const merged = mergeLayers(settingsState, patch)
-    for (const key of Object.keys(settingsState)) delete settingsState[key]
-    Object.assign(settingsState, merged)
-    if (watched !== undefined) await watched(settingsScope.get(), undefined)
-  },
-  replace: async (section) => {
-    for (const key of Object.keys(settingsState)) delete settingsState[key]
-    Object.assign(settingsState, section)
-    if (watched !== undefined) await watched(settingsScope.get(), undefined)
-  },
-}
+const settingsRoot = new Context()
+settingsRoot.plugin(MemorySettings)
+await new Promise((resolve) => setTimeout(resolve, 30))
+const settings = settingsRoot.get('settings')
+check('the real settings service is available for the write checks', settings !== undefined)
+/** The stored user section for this plugin's namespace. */
+const stored = () => settings.describe().find((descriptor) => descriptor.ns === 'per-request-billing')?.user ?? {}
+
 const catalogModels = [{ id: 'model-a', name: 'A' }]
 const stubCatalogCtx = {
   llm: {
@@ -251,10 +261,7 @@ const stubCatalogCtx = {
     listProviders: () => [],
     listModels: async () => catalogModels,
   },
-  settings: {
-    register: () => settingsScope,
-    describe: () => [],
-  },
+  settings,
   systemPrompt: { section: () => () => {} },
   tools: { register: () => () => {} },
   get: (service) => {
@@ -311,55 +318,76 @@ check('GET returns the provider catalog', read.payload.catalog.providers.length 
 
 const wrote = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: true })
 check('POST marks the model', wrote.status === 200 && wrote.payload.catalog.providers[0].models[0].marked === true, JSON.stringify(wrote.payload.catalog?.providers))
-check('the mark landed in the settings namespace', settingsState.models['demo/model-a'] === 'per-request', JSON.stringify(settingsState.models))
+check('the mark landed in the settings namespace', stored().models?.['demo/model-a'] === 'per-request', JSON.stringify(stored()))
 
 const reread = await invoke('GET')
 check('a later GET sees the persisted mark', reread.payload.catalog.providers[0].models[0].marked === true)
 
-const cleared = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: false })
-check('POST unmarks the model', cleared.payload.catalog.providers[0].models[0].marked === false)
-// An unmark must be expressible as the explicit opposite mode: `update` deep-
-// merges, so a key omitted from the patch survives and a delete-based unmark
-// is a silent no-op against the real service.
-check('the unmark is stored as an explicit per-token override',
-  settingsState.models['demo/model-a'] === 'per-token', JSON.stringify(settingsState.models))
-check('the unmarked model reports itself as explicitly set',
-  cleared.payload.catalog.providers[0].models[0].explicit === true)
-
-/**
- * Reset the stored user section and let the plugin observe it, the way a fresh
- * document plus one commit would. Writing through the route alone cannot clear
- * an explicit mark, so the checks below start from a known section instead.
- * @param next - the user section to install.
- */
-const setState = async (next) => {
-  for (const key of Object.keys(settingsState)) delete settingsState[key]
-  Object.assign(settingsState, { global: false, providerDefault: {}, models: {} }, next)
-  if (watched !== undefined) await watched(settingsScope.get(), undefined)
+/** Replace the stored user section, the way a fresh document would look. */
+const setState = async (next = {}) => {
+  await settings.replace('per-request-billing', { global: false, providerDefault: {}, models: {}, ...next })
 }
+const providerOf = (result) => result.payload.catalog.providers[0]
+const modelOf = (result) => result.payload.catalog.providers[0].models[0]
 
-await setState({})
+const cleared = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: false })
+check('POST unmarks the model', modelOf(cleared).marked === false)
+// The requested value already equals what the model inherits, so the override
+// is dropped rather than restated: storing it would freeze the model and stop
+// it following its provider.
+check('the unmark drops the override rather than freezing it',
+  stored().models?.['demo/model-a'] === undefined, JSON.stringify(stored()))
+check('the unmarked model is not reported as explicitly set', modelOf(cleared).explicit === false)
+
+await setState()
 const providerOn = await invoke('POST', { scope: 'provider', provider: 'demo', on: true })
-check('POST marks the provider', providerOn.payload.catalog.providers[0].marked === true)
-check('its models inherit the provider mark', providerOn.payload.catalog.providers[0].models[0].marked === true)
-check('an inherited model is not reported as explicit',
-  providerOn.payload.catalog.providers[0].models[0].explicit === false)
-const providerOff = await invoke('POST', { scope: 'provider', provider: 'demo', on: false })
-check('POST unmarks the provider', providerOff.payload.catalog.providers[0].marked === false, JSON.stringify(settingsState.providerDefault))
-check('the provider unmark is stored explicitly', settingsState.providerDefault.demo === 'per-token')
-check('and its models follow it back down', providerOff.payload.catalog.providers[0].models[0].marked === false)
-// A model may now opt back IN against a per-token provider default.
-const reMarked = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: true })
-check('a model can override its provider default', reMarked.payload.catalog.providers[0].models[0].marked === true)
-check('the override wins over the provider default',
-  reMarked.payload.catalog.providers[0].marked === false && reMarked.payload.catalog.providers[0].models[0].marked === true)
+check('POST marks the provider', providerOf(providerOn).marked === true)
+check('its models inherit the provider mark', modelOf(providerOn).marked === true)
+check('an inherited model is not reported as explicit', modelOf(providerOn).explicit === false)
+check('an inherited mark is stored once, on the provider',
+  stored().providerDefault?.demo === 'per-request' && Object.keys(stored().models ?? {}).length === 0,
+  JSON.stringify(stored()))
 
-await setState({})
+const providerOff = await invoke('POST', { scope: 'provider', provider: 'demo', on: false })
+check('POST unmarks the provider', providerOf(providerOff).marked === false, JSON.stringify(stored()))
+check('the provider unmark drops the override instead of freezing it',
+  stored().providerDefault?.demo === undefined, JSON.stringify(stored()))
+check('and its models follow it back down', modelOf(providerOff).marked === false)
+
+await setState()
+const reMarked = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: true })
+check('a model can be marked on its own', modelOf(reMarked).marked === true && modelOf(reMarked).explicit === true)
+check('the individual mark is stored', stored().models?.['demo/model-a'] === 'per-request', JSON.stringify(stored()))
+// Switching a parent level re-establishes inheritance for everything under it,
+// so a model marked individually starts following its provider again instead of
+// outvoting it forever.
+const followDown = await invoke('POST', { scope: 'provider', provider: 'demo', on: false })
+check('toggling the provider clears individual model marks',
+  Object.keys(stored().models ?? {}).length === 0, JSON.stringify(stored()))
+check('and the model follows the provider down',
+  modelOf(followDown).marked === false && modelOf(followDown).explicit === false)
+const followUp = await invoke('POST', { scope: 'provider', provider: 'demo', on: true })
+check('and follows it back up', modelOf(followUp).marked === true && modelOf(followUp).explicit === false)
+
+// Setting a model to the value it already inherits clears the override instead
+// of freezing it, so the chip returns to "follows its provider".
+await setState({ providerDefault: { demo: 'per-request' } })
+const redundant = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: true })
+check('a model mark equal to what it inherits is not stored',
+  Object.keys(stored().models ?? {}).length === 0, JSON.stringify(stored()))
+check('and the model still reads as per-request', modelOf(redundant).marked === true)
+const optedOut = await invoke('POST', { scope: 'model', provider: 'demo', model: 'model-a', on: false })
+check('a model can opt out of a marked provider',
+  modelOf(optedOut).marked === false && stored().models?.['demo/model-a'] === 'per-token')
+
+await setState({ providerDefault: { demo: 'per-token' }, models: { 'demo/model-a': 'per-token' } })
 const globalOn = await invoke('POST', { scope: 'global', on: true })
-check('POST marks everything globally', globalOn.payload.catalog.providers[0].marked === true)
-check('global reaches every model', globalOn.payload.catalog.providers[0].models[0].marked === true)
+check('POST marks everything globally', providerOf(globalOn).marked === true && modelOf(globalOn).marked === true)
+check('the global switch clears the levels below it',
+  Object.keys(stored().providerDefault ?? {}).length === 0 && Object.keys(stored().models ?? {}).length === 0,
+  JSON.stringify(stored()))
 const globalOff = await invoke('POST', { scope: 'global', on: false })
-check('POST clears the global switch', globalOff.payload.catalog.providers[0].marked === false)
+check('POST clears the global switch', providerOf(globalOff).marked === false)
 
 const bad = await invoke('POST', { scope: 'nonsense' })
 check('an unknown scope is refused without crashing the route', bad.status === 400 && bad.payload.ok === false, JSON.stringify(bad.payload))
@@ -368,11 +396,12 @@ check('an unknown scope is refused without crashing the route', bad.status === 4
 // send (a form post, or fetch with text/plain) must be refused before the body
 // is read. A JSON content type is what forces the CORS preflight this route
 // never answers.
+const beforeRefused = JSON.stringify(stored())
 const formPost = await invoke('POST', { scope: 'global', on: true }, { headers: { 'content-type': 'application/x-www-form-urlencoded' } })
 check('a non-JSON content type is refused', formPost.status === 415 && formPost.payload.ok === false, JSON.stringify(formPost.payload))
 const noType = await invoke('POST', { scope: 'global', on: true }, { headers: {} })
 check('a missing content type is refused', noType.status === 415, JSON.stringify(noType.payload))
-check('and the refused cross-site write changed nothing', settingsState.global === false, JSON.stringify(settingsState))
+check('and the refused cross-site write changed nothing', JSON.stringify(stored()) === beforeRefused, JSON.stringify(stored()))
 
 const huge = await invoke('POST', undefined, { raw: '{"scope":"global","on":true,"pad":"' + 'x'.repeat(70 * 1024) + '"}' })
 check('an oversized body is refused', huge.status === 413 && huge.payload.ok === false, JSON.stringify(huge.payload))
