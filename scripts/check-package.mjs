@@ -77,12 +77,29 @@ if (existsSync(bundlePath)) {
   }
   if (handoff !== undefined) {
     check('the factory is callable', typeof handoff.factory === 'function')
-    const exported = handoff.factory((specifier) => {
-      if (specifier === 'react') return { createElement: () => null, useState: (value) => [value, () => {}], useEffect: () => {} }
-      throw new Error(`unseeded require: ${specifier}`)
-    })
-    check('only platform-seeded specifiers are required', true)
-    check('the bundle exports apply', typeof exported.apply === 'function')
+    // `require` is answered by the loader's module table; every specifier the
+    // bundle asks for must be one the platform actually seeds, or the browser
+    // throws at load. Track the asks instead of asserting a constant.
+    const SEEDED = ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/cordis']
+    const asked = []
+    let unseeded
+    let exported
+    try {
+      exported = handoff.factory((specifier) => {
+        asked.push(specifier)
+        if (!SEEDED.includes(specifier)) {
+          unseeded = specifier
+          throw new Error(`unseeded require: ${specifier}`)
+        }
+        return { createElement: () => null, useState: (value) => [value, () => {}], useEffect: () => {} }
+      })
+    } catch (error) {
+      check('the factory runs with only seeded specifiers', false, error.message)
+    }
+    check('the factory only requires platform-seeded specifiers', unseeded === undefined,
+      `tried to require ${unseeded}; seeded: ${SEEDED.join(', ')}`)
+    check('the factory requires at least one module', asked.length > 0, 'no require() calls were made')
+    check('the bundle exports apply', typeof exported?.apply === 'function')
   }
 }
 
