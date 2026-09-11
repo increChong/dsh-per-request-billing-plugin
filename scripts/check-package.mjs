@@ -53,6 +53,13 @@ if (typeof patchPath === 'string') {
 
 check('declares dsh.client.platform', manifest.dsh?.client?.platform === 'web', JSON.stringify(manifest.dsh?.client?.platform))
 check('declares client externals', Array.isArray(manifest.dsh?.client?.external), 'needed for specifiers beyond the platform seed')
+// Forwarded host events only reach the browser through the remote gateway, and
+// its `ctx.remote` service exists only once the api-remotes client half has
+// applied. Without this declaration the subscription can silently find nothing
+// and the UI stops noticing anything the host learns later.
+check('declares the remote gateway its event subscription needs',
+  (manifest.dsh?.client?.inject ?? []).includes('@deepseek-ai/dsh-api-remotes'),
+  JSON.stringify(manifest.dsh?.client?.inject))
 
 // DSH's own packages are peers the runtime supplies; schemastery is a real dep.
 const peers = Object.keys(manifest.peerDependencies ?? {})

@@ -128,7 +128,7 @@ const stubCtx = {
 // The client half talks to the host over one JSON route. Model the real
 // catalog shape (including `explicit`, which is what marks a model as
 // individually set) so the UI's own logic is exercised, not just its markup.
-const catalogResponse = {
+let catalogResponse = {
   global: false,
   providers: [{
     provider: 'demo',
@@ -239,6 +239,34 @@ await new Promise((resolve) => setTimeout(resolve, 0))
     JSON.stringify(writes[0]) === JSON.stringify({ scope: 'provider', provider: 'demo', on: true }), JSON.stringify(writes[0]))
   check('a menu row writes only its own model',
     JSON.stringify(writes[1]) === JSON.stringify({ scope: 'model', provider: 'demo', model: 'model-a', on: false }), JSON.stringify(writes[1]))
+
+  // A provider added while this page is open is absent from the catalog the
+  // page loaded — exactly what a newly added provider looks like. The card has
+  // to ask again instead of dead-ending on a message the user cannot act on.
+  const textAt = (node) => [].concat(node.children ?? []).filter((child) => typeof child === 'string').join('')
+  const lateProvider = { provider: 'added-later', displayName: 'Later', marked: false, explicit: false, error: null, models: [{ id: 'm-late', marked: false, explicit: false }] }
+  const beforeRecheck = globalThis.fetchCalls
+  const late = flatten(entry.component({ provider: { provider: lateProvider.provider, displayName: 'Later' } }))
+  check('an unknown provider asks the host again', globalThis.fetchCalls > beforeRecheck,
+    `${globalThis.fetchCalls - beforeRecheck} fetch(es)`)
+  check('and shows the loading hint while it waits', late.map(textAt).join('').includes('读取模型配置'),
+    late.map(textAt).join(''))
+
+  // The retry reads the catalog when it settles, so teach the stub first.
+  catalogResponse = { ...catalogResponse, providers: [...catalogResponse.providers, lateProvider] }
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const caughtUp = flatten(entry.component({ provider: { provider: lateProvider.provider, displayName: 'Later' } }))
+  check('and renders the card once the catalog catches up',
+    caughtUp.some((node) => node.type === 'details'), `${caughtUp.length} node(s)`)
+
+  const unknown = { provider: 'never-reported', displayName: 'X' }
+  flatten(entry.component({ provider: unknown }))            // the one allowed re-ask
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  const settledCalls = globalThis.fetchCalls
+  const settled = flatten(entry.component({ provider: unknown }))
+  check('a route the host never reports settles on a message instead of re-asking forever',
+    settled.map(textAt).join('').includes('刷新页面'), settled.map(textAt).join(''))
+  check('and stops asking', globalThis.fetchCalls === settledCalls, `${globalThis.fetchCalls - settledCalls} extra fetch(es)`)
 }
 
 // ------------------------------------------------------- host route contract
