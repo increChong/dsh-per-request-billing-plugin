@@ -84,6 +84,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/increChong/dsh-per-request-billing.git"
+    "url": "git+https://github.com/increChong/dsh-per-request-billing-plugin.git"
   }
 }
