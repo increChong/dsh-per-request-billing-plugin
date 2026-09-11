@@ -75,11 +75,9 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings-models"
       ],
-      "external": [
-        "@deepseek-ai/dsh-client-ui-settings"
-      ]
+      "external": []
     }
   },
   "repository": {

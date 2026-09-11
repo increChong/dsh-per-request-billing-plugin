@@ -11,6 +11,11 @@
  * package.json for the ones this plugin adds — because a `require` the table
  * cannot answer is a guaranteed runtime throw.
  *
+ * The UI is one seat: the extension area inside each provider card on the
+ * Models settings page. There is deliberately no page of its own — marking is
+ * a property of a provider and its models, so it belongs where those are
+ * configured, not in a separate tab listing the same thing again.
+ *
  * Deliberately no JSX and no TypeScript: elements are built with
  * `React.createElement`. That keeps the browser artifact reproducible from
  * source without the repository's tsc + tsdown pipeline.
@@ -28,40 +33,30 @@ const CSS = [
   '.prb-name{font-weight:600}',
   '.prb-badge{font-size:10px;border-radius:999px;padding:1px 7px;border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-label-secondary)}',
   '.prb-on{color:var(--dsw-alias-state-warn-primary);border-color:var(--dsw-alias-state-warn-primary)}',
-  '.prb-ok{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary)}',
   '.prb-row{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}',
   '.prb-row input{margin:0}',
   '.prb-models{display:flex;flex-wrap:wrap;gap:4px 10px;padding-left:18px}',
   '.prb-model{display:flex;align-items:center;gap:4px;padding:2px 6px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;font-size:11px;cursor:pointer;user-select:none}',
   '.prb-model.prb-active{border-color:var(--dsw-alias-state-warn-primary)}',
-  '.prb-actions{display:flex;gap:6px;flex-wrap:wrap}',
-  '.prb-btn{border:1px solid var(--dsw-alias-border-l2);background:transparent;color:inherit;font:inherit;font-size:11px;border-radius:6px;padding:2px 8px;cursor:pointer}',
-  '.prb-input{flex:1;min-width:120px;background:var(--dsw-alias-bg-base);border:1px solid var(--dsw-alias-border-l1);border-radius:6px;padding:2px 6px;color:inherit;font:inherit;font-size:11px}',
   '.prb-err{color:var(--dsw-alias-state-error-primary)}',
   '.prb-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}',
 ].join('\n')
 
 const T = {
-  title: '按次计费模型优化',
-  nav: '按次计费',
-  intro: '被勾选的提供方 / 模型视为「按次计费」。使用这些模型时，插件会自动向系统提示词注入调用优化策略：批量与并行调用工具、一次拿全量信息、复用已有结果、主动使用更长上下文，从而尽量用更少的请求次数完成任务。安全底线：优化只作用于调用方式，绝不跳过授权与审批。标记会持久化保存。',
-  manual: '手动加入模型 id（配置里还没有的）',
-  add: '加入',
-  global: '全局：所有模型都按次计费',
-  providerLine: '提供方整体按次计费（其下所有模型）',
-  models: '单模型',
-  noModels: '该提供方尚无模型配置（可在模型配置页添加，或在下方手动输入模型 id）。',
-  resetModels: '清除单模型勾选',
-  inherited: '继承',
+  title: '按次计费',
+  providerLine: '该提供方的模型都按次计费',
+  models: '单个模型',
+  noModels: '该提供方还没有配置模型。',
+  unavailable: '未能读取该提供方的模型清单。',
+  loading: '读取模型配置…',
+  inherited: '跟随提供方',
   explicit: '单独设置',
   marked: '按次计费',
   unmarked: '按量计费',
-  stats: '已优化步骤',
-  loading: '读取模型配置…',
-  retry: '重试',
+  hint: '按次计费的模型会在每次组装提示词时被引导「少发请求、多用上下文」。切换提供方开关会让其下模型重新跟随提供方。',
 }
 
-/** Minimal external store so both seats re-render from one snapshot. */
+/** Minimal external store so every card re-renders from one snapshot. */
 function createStore() {
   let snapshot = { ready: false, error: null, catalog: { global: false, providers: [], stats: { markedModels: 0, totalModels: 0, steps: 0 } } }
   const listeners = new Set()
@@ -95,29 +90,6 @@ function Row(props) {
   )
 }
 
-function ManualAdd(props) {
-  const pair = React.useState('')
-  const draft = pair[0]
-  const setDraft = pair[1]
-  return React.createElement('div', { className: 'prb-head' },
-    React.createElement('input', {
-      className: 'prb-input',
-      placeholder: T.manual,
-      value: draft,
-      onChange: (event) => setDraft(event.target.value),
-    }),
-    React.createElement('button', {
-      className: 'prb-btn',
-      onClick: () => {
-        const id = String(draft).trim()
-        if (id.length === 0) return
-        props.onAdd(id)
-        setDraft('')
-      },
-    }, T.add),
-  )
-}
-
 function ModelChips(props) {
   const models = props.provider.models
   if (models.length === 0) return React.createElement('div', { className: 'prb-hint' }, T.noModels)
@@ -137,81 +109,18 @@ function ModelChips(props) {
 }
 
 function plugin(store, write) {
-  function ProviderBlock(props) {
-    const provider = props.provider
-    return React.createElement('div', { className: 'prb-card' },
-      React.createElement('div', { className: 'prb-head' },
-        React.createElement('span', { className: 'prb-name' }, provider.displayName),
-        React.createElement('span', { className: 'prb-badge prb-mono' }, provider.provider),
-        React.createElement('span', { className: 'prb-badge ' + (provider.marked ? 'prb-on' : '') }, provider.marked ? T.marked : T.unmarked),
-        provider.error ? React.createElement('span', { className: 'prb-badge prb-err' }, provider.error) : null,
-      ),
-      React.createElement(Row, {
-        checked: provider.marked,
-        label: T.providerLine,
-        onChange: (on) => write({ scope: 'provider', provider: provider.provider, on }),
-      }),
-      React.createElement(ModelChips, {
-        provider,
-        onToggle: (model, on) => write({ scope: 'model', provider: provider.provider, model, on }),
-      }),
-      React.createElement(ManualAdd, {
-        key: 'manual:' + provider.provider,
-        onAdd: (model) => write({ scope: 'model', provider: provider.provider, model, on: true }),
-      }),
-    )
-  }
-
-  /** Full settings page. */
-  function Panel() {
-    const state = useSnapshot(store)
-    const catalog = state.catalog
-    if (!state.ready) {
-      return React.createElement('div', { className: 'prb-root' },
-        React.createElement('div', { className: 'prb-hint' }, state.error === null ? T.loading : state.error),
-      )
-    }
-    return React.createElement('div', { className: 'prb-root' },
-      React.createElement('div', { className: 'prb-head' },
-        React.createElement('span', { className: 'prb-name' }, T.title),
-        React.createElement('span', { className: 'prb-badge ' + (catalog.stats.markedModels > 0 || catalog.global ? 'prb-ok' : '') }, catalog.stats.markedModels + '/' + catalog.stats.totalModels),
-        React.createElement('span', { className: 'prb-badge' }, T.stats + ': ' + catalog.stats.steps),
-      ),
-      React.createElement('div', { className: 'prb-hint' }, T.intro),
-      React.createElement('div', { className: 'prb-card' },
-        React.createElement(Row, {
-          checked: catalog.global,
-          label: T.global,
-          onChange: (on) => write({ scope: 'global', on }),
-        }),
-      ),
-      catalog.providers.map((provider) => React.createElement(ProviderBlock, { key: provider.provider, provider })),
-      React.createElement('div', { className: 'prb-actions' },
-        React.createElement('button', {
-          className: 'prb-btn',
-          onClick: async () => {
-            for (const provider of state.catalog.providers) {
-              for (const model of provider.models) {
-                if (model.explicit) await write({ scope: 'model', provider: provider.provider, model: model.id, on: false })
-              }
-            }
-          },
-        }, T.resetModels),
-      ),
-      state.error === null ? null : React.createElement('div', { className: 'prb-hint prb-err' }, state.error),
-    )
-  }
-
-  /** Compact per-provider area inside a Models-page provider card. */
+  /** The extension area of one Models-page provider card. */
   function ProviderCard(props) {
     const state = useSnapshot(store)
     const route = props !== null && typeof props === 'object' && props.provider !== null && typeof props.provider === 'object'
       ? String(props.provider.provider)
       : ''
+    const hint = (text, error) => React.createElement('div', { className: 'prb-root' },
+      React.createElement('div', { className: 'prb-hint' + (error ? ' prb-err' : '') }, text))
+    if (!state.ready) return hint(state.error ?? T.loading, state.error !== null)
     const provider = state.catalog.providers.find((candidate) => candidate.provider === route)
-    // Report a failed read instead of showing the loading hint forever.
-    if (!state.ready) return React.createElement('div', { className: 'prb-root prb-hint' }, state.error ?? T.loading)
-    if (provider === undefined) return React.createElement('div', { className: 'prb-root prb-hint' }, T.loading)
+    if (provider === undefined) return hint(T.unavailable)
+
     return React.createElement('div', { className: 'prb-root' },
       React.createElement('div', { className: 'prb-head' },
         React.createElement('span', { className: 'prb-name' }, T.title),
@@ -227,14 +136,12 @@ function plugin(store, write) {
         provider,
         onToggle: (model, on) => write({ scope: 'model', provider: provider.provider, model, on }),
       }),
-      React.createElement(ManualAdd, {
-        key: 'manual:' + provider.provider,
-        onAdd: (model) => write({ scope: 'model', provider: provider.provider, model, on: true }),
-      }),
+      state.error === null ? null : React.createElement('div', { className: 'prb-hint prb-err' }, state.error),
+      React.createElement('div', { className: 'prb-hint' }, T.hint),
     )
   }
 
-  return { Panel, ProviderCard }
+  return { ProviderCard }
 }
 
 /**
@@ -297,21 +204,15 @@ exports.apply = function apply(ctx) {
     return
   }
 
-  slots.inject('settings.section', () => slots.register({
-    name: 'settings.section',
-    id: 'per-request-billing',
-    order: 12,
-    label: () => T.nav,
-  }, ui.Panel))
-
-  slots.inject('settings.models.provider-card', () => slots.register({
-    name: 'settings.models.provider-card',
-    key: 'llm-pi-ai',
-  }, ui.ProviderCard))
-  slots.inject('settings.models.provider-card', () => slots.register({
-    name: 'settings.models.provider-card',
-    key: 'llm-deepseek',
-  }, ui.ProviderCard))
+  // Keyed by the row's owning settings namespace, so one registration per
+  // adapter family covers every card of that family — shipped, added, and
+  // hand-declared rows alike.
+  for (const settingsNs of ['llm-pi-ai', 'llm-deepseek']) {
+    slots.inject('settings.models.provider-card', () => slots.register({
+      name: 'settings.models.provider-card',
+      key: settingsNs,
+    }, ui.ProviderCard))
+  }
 
   // The provider directory can change while the page is open. Host events reach
   // the browser only through the remote gateway, and every forwarded event is
