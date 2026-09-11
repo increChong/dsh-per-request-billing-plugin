@@ -204,28 +204,40 @@ await new Promise((resolve) => setTimeout(resolve, 0))
   const entry = registered.find((e) => e.options.name === 'settings.models.provider-card' && e.options.key === 'llm-pi-ai')
   const tree = flatten(entry.component({ provider: { provider: 'demo', displayName: 'Demo' } }))
   const labels = tree.filter((node) => node.type === 'label')
-  const providerRow = labels.find((node) => node.props.className === 'prb-row')
-  const chip = (id) => labels.find((node) => String(node.props.className).startsWith('prb-model')
-    && flatten(node.children).some((child) => child.type === 'span' && [].concat(child.children ?? []).includes(id)))
+  const providerRow = labels.find((node) => node.props?.className === 'prb-row')
+  const items = labels.filter((node) => node.props?.className === 'prb-item')
+  const item = (id) => items.find((node) => flatten(node.children)
+    .some((child) => child.type === 'span' && [].concat(child.children ?? []).includes(id)))
+  const textOf = (node) => flatten(node.children)
+    .map((child) => [].concat(child.children ?? []).join('')).join(' ')
+  const menu = tree.find((node) => node.type === 'details')
+  const summary = tree.find((node) => node.props?.className === 'prb-summary')
   const toggle = (label) => (value) => flatten(label.children)
     .find((child) => child.type === 'input')
     .props.onChange({ target: { checked: value } })
 
-  check('the card renders the provider switch and one chip per model',
-    providerRow !== undefined && chip('model-a') !== undefined && chip('model-b') !== undefined,
-    `${labels.length} label(s)`)
-  check('an inherited model is labelled as following its provider',
-    flatten(chip('model-b').children).some((child) => [].concat(child.children ?? []).includes('· 跟随提供方')))
-  check('an individually set model carries no inheritance label',
-    !flatten(chip('model-a').children).some((child) => [].concat(child.children ?? []).includes('· 跟随提供方')))
+  // The list has to be collapsed: a provider can carry a dozen models, and
+  // rendering them inline buries the card's own controls.
+  check('the card renders the provider switch and a model menu',
+    providerRow !== undefined && menu !== undefined, `${labels.length} label(s)`)
+  check('the menu starts collapsed', menu.props?.open === undefined)
+  check('the menu holds one row per configured model',
+    items.length === 2 && item('model-a') !== undefined && item('model-b') !== undefined,
+    `${items.length} item(s)`)
+  check('the collapsed summary reports how many models are set individually',
+    textOf(summary).includes('1 个单独设置'), textOf(summary))
+  check('the summary names the overridden models on hover',
+    String(summary.props?.title).includes('model-a'), String(summary.props?.title))
+  check('an individually set model is tagged', textOf(item('model-a')).includes('单独设置'))
+  check('an inherited model carries no tag', !textOf(item('model-b')).includes('单独设置'))
 
   const before = hostCalls.length
   await toggle(providerRow)(true)
-  await toggle(chip('model-a'))(false)
+  await toggle(item('model-a'))(false)
   const writes = hostCalls.slice(before).filter((call) => call.method === 'POST').map((call) => call.body)
   check('the provider switch writes a provider mark',
     JSON.stringify(writes[0]) === JSON.stringify({ scope: 'provider', provider: 'demo', on: true }), JSON.stringify(writes[0]))
-  check('a chip writes only its own model',
+  check('a menu row writes only its own model',
     JSON.stringify(writes[1]) === JSON.stringify({ scope: 'model', provider: 'demo', model: 'model-a', on: false }), JSON.stringify(writes[1]))
 }
 
